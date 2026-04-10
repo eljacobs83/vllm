@@ -80,7 +80,37 @@ def _get_text_config(config):
     transparently returns the text config regardless of nesting.
     """
     if hasattr(config, "text_config"):
-        return config.text_config
+        config = config.text_config
+
+    # Gemma 4 requirements in HF Transformers:
+    # - default layer_types pattern is 5 sliding : 1 full attention
+    # - last layer must be full_attention
+    # - rope_parameters defaults are per-layer-type
+    #
+    # Some exported/converted checkpoints can miss these post-init defaults,
+    # so normalize here for robustness.
+    if getattr(config, "layer_types", None) is None:
+        sliding_window_pattern = 6
+        config.layer_types = [
+            "sliding_attention" if bool((i + 1) % sliding_window_pattern) else
+            "full_attention" for i in range(config.num_hidden_layers)
+        ]
+    if config.layer_types and config.layer_types[-1] != "full_attention":
+        config.layer_types[-1] = "full_attention"
+
+    if getattr(config, "rope_parameters", None) is None:
+        config.rope_parameters = {
+            "sliding_attention": {
+                "rope_type": "default",
+                "rope_theta": 10_000.0,
+            },
+            "full_attention": {
+                "rope_type": "proportional",
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 1_000_000.0,
+            },
+        }
+
     return config
 
 

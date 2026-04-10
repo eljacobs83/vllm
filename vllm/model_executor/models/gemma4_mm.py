@@ -39,7 +39,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM, _get_text_config
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -874,6 +874,10 @@ class Gemma4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        text_config = _get_text_config(config)
+        # Keep nested multimodal config and normalized text config in sync.
+        if hasattr(config, "text_config"):
+            config.text_config = text_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
@@ -884,7 +888,7 @@ class Gemma4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
-                config.vision_config, config.text_config
+                config.vision_config, text_config
             )
 
         # ---- Audio tower (variants with audio_config) ----
@@ -897,7 +901,7 @@ class Gemma4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 # position embeddings, softcap, gradient_clipping).
                 self.audio_tower.post_init()
                 self.embed_audio = Gemma4MultimodalEmbedder(
-                    config.audio_config, config.text_config
+                    config.audio_config, text_config
                 )
         else:
             self.audio_tower = None
@@ -907,18 +911,18 @@ class Gemma4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         with self._mark_language_model(vllm_config):
             self.language_model: Gemma4ForCausalLM = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                hf_config=config.text_config,
+                hf_config=text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=["Gemma4ForCausalLM"],
             )
 
             # Pre-allocate PLE buffer for CUDA graph compatibility.
             # Some variants have hidden_size_per_layer_input=None (no PLE).
-            ple_dim = config.text_config.hidden_size_per_layer_input
+            ple_dim = text_config.hidden_size_per_layer_input
             if ple_dim is not None:
                 self.per_layer_embeddings = torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
-                    config.text_config.num_hidden_layers,
+                    text_config.num_hidden_layers,
                     ple_dim,
                     device=(self.language_model.model.embed_tokens.weight.device),
                     dtype=(self.language_model.model.embed_tokens.weight.dtype),
